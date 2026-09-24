@@ -1,0 +1,60 @@
+# Slots do Program Object "JCI_SEQ" — VERSÃO 5 DISPOSITIVOS
+
+Mesma base da versão de 4, com os slots do Device5 adicionados. Nomes
+idênticos ao padrão `DeviceX...` do SCL original, estendido para X=5.
+
+## Entradas (linkáveis, Execute On Change = ON)
+
+| Slot           | Tipo             | Default |
+|----------------|------------------|---------|
+| Input          | StatusNumeric    | 0       |
+| InstantShutdown| StatusBoolean    | false   |
+| RotateNow      | StatusBoolean    | false   |
+| Device1Enable  | StatusBoolean    | false   |
+| Device2Enable  | StatusBoolean    | false   |
+| Device3Enable  | StatusBoolean    | false   |
+| Device4Enable  | StatusBoolean    | false   |
+| **Device5Enable** | StatusBoolean | false   | **novo** |
+| Device1Rank    | StatusNumeric    | 0       |
+| Device2Rank    | StatusNumeric    | 0       |
+| Device3Rank    | StatusNumeric    | 0       |
+| Device4Rank    | StatusNumeric    | 0       |
+| **Device5Rank**   | StatusNumeric | 0       | **novo** |
+| Heartbeat      | StatusNumeric    | 0       |
+
+## Configuração — todos default = 0
+
+| Slot                | Tipo          | Default |
+|---------------------|---------------|---------|
+| MakeLimit1..4        | StatusNumeric | 0       |
+| **MakeLimit5**        | StatusNumeric | 0       | **novo** |
+| BreakLimit1..4       | StatusNumeric | 0       |
+| **BreakLimit5**       | StatusNumeric | 0       | **novo** |
+| MinOnTime            | RelTime       | 0s      |
+| MinOffTime           | RelTime       | 0s      |
+| InterstageOnDelay    | RelTime       | 0s      |
+| InterstageOffDelay   | RelTime       | 0s      |
+
+## Saídas (flag Readonly + Summary)
+
+| Slot             | Tipo          |
+|------------------|---------------|
+| Device1Out       | StatusBoolean |
+| Device2Out       | StatusBoolean |
+| Device3Out       | StatusBoolean |
+| Device4Out       | StatusBoolean |
+| **Device5Out**       | StatusBoolean | **novo** |
+| CurrentStage     | StatusNumeric |
+| OperatingState   | StatusNumeric (0 Idle / 1 Starting / 2 Running / 3 Stopping) |
+| InterstageTiming | StatusBoolean |
+
+## Como migrar de uma instância já rodando com 4 bombas
+
+1. **Não precisa apagar nada** — os slots das bombas 1 a 4 continuam com
+   os mesmos nomes e mesmo comportamento.
+2. Crie os 5 slots novos marcados acima como **novo**.
+3. Substitua o conteúdo da aba Edit pelo `JCI_SEQ_N4_ProgramObject_5devices.java`.
+4. Compile. Se faltar algum slot, o erro `cannot find symbol` vai
+   apontar exatamente qual (mesmo padrão de erro que você já viu).
+5. Linke a bomba física 5 (Enable/Rank/Out) e ajuste MakeLimit5/BreakLimit5
+   em campo.
