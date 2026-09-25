@@ -1,0 +1,1107 @@
+FUNCTION_BLOCK "JCI_SEQ"
+VERSION : 0.8
+
+VAR_INPUT
+    Input : Real;
+    InstantShutdown : Bool;
+    RotateNow : Bool;
+
+    Device1Enable : Bool;
+    Device2Enable : Bool;
+    Device3Enable : Bool;
+    Device4Enable : Bool;
+
+    Device1Rank : DInt;
+    Device2Rank : DInt;
+    Device3Rank : DInt;
+    Device4Rank : DInt;
+
+    MakeLimit1 : Real;
+    MakeLimit2 : Real;
+    MakeLimit3 : Real;
+    MakeLimit4 : Real;
+
+    BreakLimit1 : Real;
+    BreakLimit2 : Real;
+    BreakLimit3 : Real;
+    BreakLimit4 : Real;
+
+    MinOnTime : Time;
+    MinOffTime : Time;
+
+    InterstageOnDelay : Time;
+    InterstageOffDelay : Time;
+END_VAR
+
+VAR_OUTPUT
+    Device1Out : Bool := FALSE;
+    Device2Out : Bool := FALSE;
+    Device3Out : Bool := FALSE;
+    Device4Out : Bool := FALSE;
+
+    CurrentStage : Int := 0;
+    OperatingState : Int;
+    InterstageTiming : Bool;
+END_VAR
+
+VAR
+    Enable : Array[1..4] of Bool;
+    Rank : Array[1..4] of DInt;
+
+    ActualOut : Array[1..4] of Bool;
+    DesiredOut : Array[1..4] of Bool;
+
+    BaseOrder : Array[1..4] of Int;
+    Order : Array[1..4] of Int;
+
+    PreviousStage : Int;
+
+    Demand : Real;                 // FIX I2: variavel de demanda limitada 0-100%
+
+    RotatePulse : Bool;
+    LastRotateNow : Bool;
+
+    TempIndex : Int;
+    i : Int;
+    j : Int;
+    k : Int;
+    DeviceIndex : Int;
+
+    ActiveCount : Int;
+    EnabledCount : Int;
+
+    UpDevice : Int;
+    DownDevice : Int;
+
+    RotateOut : Int;
+    RotateIn : Int;
+    RotatePos : Int;
+    CandidatePos : Int;
+
+    PreviousOut : Array[1..4] of Bool;
+
+    MinOffBypass1 : Bool := TRUE;
+    MinOffBypass2 : Bool := TRUE;
+    MinOffBypass3 : Bool := TRUE;
+    MinOffBypass4 : Bool := TRUE;
+
+    InterstageOnActive : Bool;
+    InterstageOffActive : Bool;
+
+    // >>> FIX (V0.7): flags para impedir que InterstageOnActive/
+    // OffActive sejam zeradas e re-armadas no MESMO scan, o que
+    // impede o TON de ver a borda FALSE->TRUE real e trava o Q em
+    // TRUE para sempre apos o primeiro estagio (ver comentario na
+    // Secao 11).
+    InterstageOnJustCleared : Bool;
+    InterstageOffJustCleared : Bool;
+
+    StageChangedThisScan : Bool;
+    StageUpRequest : Bool;
+    StageDownRequest : Bool;
+
+    MinOffOK1 : Bool;
+    MinOffOK2 : Bool;
+    MinOffOK3 : Bool;
+    MinOffOK4 : Bool;
+
+    MinOnOK1 : Bool;
+    MinOnOK2 : Bool;
+    MinOnOK3 : Bool;
+    MinOnOK4 : Bool;
+
+    T_MinOn1 : TON_TIME;
+    T_MinOn2 : TON_TIME;
+    T_MinOn3 : TON_TIME;
+    T_MinOn4 : TON_TIME;
+
+    T_MinOff1 : TON_TIME;
+    T_MinOff2 : TON_TIME;
+    T_MinOff3 : TON_TIME;
+    T_MinOff4 : TON_TIME;
+
+    T_InterstageOn : TON_TIME;
+    T_InterstageOff : TON_TIME;
+END_VAR
+
+BEGIN
+
+// ============================================================
+// 1 - COPIA ENTRADAS
+// ============================================================
+
+Enable[1] := Device1Enable;
+Enable[2] := Device2Enable;
+Enable[3] := Device3Enable;
+Enable[4] := Device4Enable;
+
+Rank[1] := Device1Rank;
+Rank[2] := Device2Rank;
+Rank[3] := Device3Rank;
+Rank[4] := Device4Rank;
+
+ActualOut[1] := Device1Out;
+ActualOut[2] := Device2Out;
+ActualOut[3] := Device3Out;
+ActualOut[4] := Device4Out;
+
+
+// ============================================================
+// 2 - ESTADO ANTERIOR
+// ============================================================
+
+PreviousStage := CurrentStage;
+
+
+// ============================================================
+// 3 - DETECTA TRANSICOES OFF PARA INICIAR MIN OFF
+//
+// Em um FB novo, equipamentos que ja estao OFF sao considerados
+// liberados para a primeira partida.
+//
+// >>> FIX C1 (V0.6): PreviousOut agora e atualizado AQUI, logo
+// apos a comparacao, e nao mais no final do scan. Na V0.5,
+// PreviousOut (atualizado no fim do scan) e ActualOut (lido no
+// inicio do scan seguinte) sempre continham o MESMO valor no
+// momento da comparacao - ambos espelhavam o mesmo Device_Out
+// sem nenhuma varredura de defasagem real entre eles, entao a
+// transicao ON->OFF nunca era detectada e o Min Off nunca
+// chegava a ser aplicado (MinOffBypass ficava TRUE para sempre).
+//
+// Atualizando PreviousOut aqui, ele passa a refletir o estado de
+// UMA varredura atras em relacao a ActualOut, permitindo a
+// deteccao real da transicao (com um atraso de 1 scan, o que e
+// desprezivel frente aos tempos de MinOffTime tipicos).
+// ============================================================
+
+IF PreviousOut[1] AND NOT ActualOut[1] THEN
+    MinOffBypass1 := FALSE;
+END_IF;
+PreviousOut[1] := ActualOut[1];
+
+IF PreviousOut[2] AND NOT ActualOut[2] THEN
+    MinOffBypass2 := FALSE;
+END_IF;
+PreviousOut[2] := ActualOut[2];
+
+IF PreviousOut[3] AND NOT ActualOut[3] THEN
+    MinOffBypass3 := FALSE;
+END_IF;
+PreviousOut[3] := ActualOut[3];
+
+IF PreviousOut[4] AND NOT ActualOut[4] THEN
+    MinOffBypass4 := FALSE;
+END_IF;
+PreviousOut[4] := ActualOut[4];
+
+
+// ============================================================
+// 4 - PULSO DE ROTATE NOW
+// ============================================================
+
+RotatePulse := FALSE;
+
+IF RotateNow AND NOT LastRotateNow THEN
+    RotatePulse := TRUE;
+END_IF;
+
+LastRotateNow := RotateNow;
+
+
+// ============================================================
+// 5 - LIMITA INPUT
+//
+// >>> FIX I2 (V0.6): a V0.5 tinha um IF vazio aqui (nao limitava
+// nada, e a variavel Demand nem existia - as comparacoes de
+// estagio usavam Input bruto). Agora Demand e efetivamente
+// calculada e limitada a faixa 0-100%, e usada nas comparacoes
+// da Secao 12 no lugar de Input.
+// ============================================================
+
+Demand := Input;
+
+IF Demand < 0.0 THEN
+    Demand := 0.0;
+END_IF;
+
+IF Demand > 100.0 THEN
+    Demand := 100.0;
+END_IF;
+
+
+// ============================================================
+// 6 - CONTA EQUIPAMENTOS HABILITADOS
+// ============================================================
+
+EnabledCount := 0;
+
+FOR i := 1 TO 4 DO
+    IF Enable[i] THEN
+        EnabledCount := EnabledCount + 1;
+    END_IF;
+END_FOR;
+
+
+// ============================================================
+// 7 - ORDENA POR RANK
+//
+// Menor Rank = maior prioridade.
+// Em empate de Rank, menor numero do dispositivo = maior
+// prioridade.
+//
+// Esta e a ordem BASE usada para todas as decisoes.
+// ============================================================
+
+BaseOrder[1] := 1;
+BaseOrder[2] := 2;
+BaseOrder[3] := 3;
+BaseOrder[4] := 4;
+
+FOR i := 1 TO 3 DO
+    FOR j := i + 1 TO 4 DO
+
+        IF Rank[BaseOrder[j]] < Rank[BaseOrder[i]] THEN
+
+            TempIndex := BaseOrder[i];
+            BaseOrder[i] := BaseOrder[j];
+            BaseOrder[j] := TempIndex;
+
+        ELSIF Rank[BaseOrder[j]] = Rank[BaseOrder[i]] THEN
+
+            IF BaseOrder[j] < BaseOrder[i] THEN
+
+                TempIndex := BaseOrder[i];
+                BaseOrder[i] := BaseOrder[j];
+                BaseOrder[j] := TempIndex;
+
+            END_IF;
+
+        END_IF;
+
+    END_FOR;
+END_FOR;
+
+
+// ============================================================
+// 8 - REORDENACAO DINAMICA
+//
+// Categoria 1: habilitado + ativo
+// Categoria 2: habilitado + inativo
+// Categoria 3: desabilitado
+//
+// Dentro de cada categoria:
+// menor Rank primeiro; empate = menor numero primeiro.
+//
+// Isso reproduz a regra de Dynamic Reordering da JCI.
+// ============================================================
+
+FOR i := 1 TO 4 DO
+    Order[i] := 0;
+END_FOR;
+
+k := 0;
+
+
+// HABILITADOS + ATIVOS
+
+FOR j := 1 TO 4 DO
+
+    DeviceIndex := BaseOrder[j];
+
+    IF Enable[DeviceIndex] AND ActualOut[DeviceIndex] THEN
+
+        k := k + 1;
+        Order[k] := DeviceIndex;
+
+    END_IF;
+
+END_FOR;
+
+
+// HABILITADOS + INATIVOS
+
+FOR j := 1 TO 4 DO
+
+    DeviceIndex := BaseOrder[j];
+
+    IF Enable[DeviceIndex] AND NOT ActualOut[DeviceIndex] THEN
+
+        k := k + 1;
+        Order[k] := DeviceIndex;
+
+    END_IF;
+
+END_FOR;
+
+
+// DESABILITADOS
+
+FOR j := 1 TO 4 DO
+
+    DeviceIndex := BaseOrder[j];
+
+    IF NOT Enable[DeviceIndex] THEN
+
+        k := k + 1;
+        Order[k] := DeviceIndex;
+
+    END_IF;
+
+END_FOR;
+
+
+// ============================================================
+// 9 - TIMERS MIN ON
+// ============================================================
+
+T_MinOn1(
+    IN := ActualOut[1],
+    PT := MinOnTime
+);
+
+T_MinOn2(
+    IN := ActualOut[2],
+    PT := MinOnTime
+);
+
+T_MinOn3(
+    IN := ActualOut[3],
+    PT := MinOnTime
+);
+
+T_MinOn4(
+    IN := ActualOut[4],
+    PT := MinOnTime
+);
+
+// >>> FIX (V0.6.1): PT := T#0ms e um caso extremo mal tratado pelo
+// TON (SFB4) - na borda de subida de IN, Q e forcado FALSE naquele
+// scan independente de PT, e com PT=0 a resolucao de ET para tempos
+// tao pequenos pode ficar instavel entre CPUs/firmwares. Comparando
+// o proprio MinOnTime com T#0ms, o bypass fica deterministico e nao
+// depende do comportamento do TON nesse caso extremo.
+
+MinOnOK1 := (MinOnTime = T#0ms) OR T_MinOn1.Q;
+MinOnOK2 := (MinOnTime = T#0ms) OR T_MinOn2.Q;
+MinOnOK3 := (MinOnTime = T#0ms) OR T_MinOn3.Q;
+MinOnOK4 := (MinOnTime = T#0ms) OR T_MinOn4.Q;
+
+
+// ============================================================
+// 10 - TIMERS MIN OFF
+//
+// Na partida inicial, MinOffBypass permanece TRUE para uma
+// saida que nunca esteve ligada. Depois que uma saida realmente
+// passa de ON para OFF, o timer passa a ser aplicado.
+// ============================================================
+
+IF MinOffBypass1 THEN
+    T_MinOff1(
+        IN := FALSE,
+        PT := MinOffTime
+    );
+ELSE
+    T_MinOff1(
+        IN := NOT ActualOut[1],
+        PT := MinOffTime
+    );
+END_IF;
+
+IF MinOffBypass2 THEN
+    T_MinOff2(
+        IN := FALSE,
+        PT := MinOffTime
+    );
+ELSE
+    T_MinOff2(
+        IN := NOT ActualOut[2],
+        PT := MinOffTime
+    );
+END_IF;
+
+IF MinOffBypass3 THEN
+    T_MinOff3(
+        IN := FALSE,
+        PT := MinOffTime
+    );
+ELSE
+    T_MinOff3(
+        IN := NOT ActualOut[3],
+        PT := MinOffTime
+    );
+END_IF;
+
+IF MinOffBypass4 THEN
+    T_MinOff4(
+        IN := FALSE,
+        PT := MinOffTime
+    );
+ELSE
+    T_MinOff4(
+        IN := NOT ActualOut[4],
+        PT := MinOffTime
+    );
+END_IF;
+
+// >>> FIX (V0.6.1): mesmo motivo do MinOnOK acima - bypass
+// deterministico quando MinOffTime = T#0ms.
+
+MinOffOK1 := MinOffBypass1 OR (MinOffTime = T#0ms) OR T_MinOff1.Q;
+MinOffOK2 := MinOffBypass2 OR (MinOffTime = T#0ms) OR T_MinOff2.Q;
+MinOffOK3 := MinOffBypass3 OR (MinOffTime = T#0ms) OR T_MinOff3.Q;
+MinOffOK4 := MinOffBypass4 OR (MinOffTime = T#0ms) OR T_MinOff4.Q;
+
+
+// ============================================================
+// 11 - INTERSTAGE TIMERS
+// ============================================================
+
+T_InterstageOn(
+    IN := InterstageOnActive,
+    PT := InterstageOnDelay
+);
+
+T_InterstageOff(
+    IN := InterstageOffActive,
+    PT := InterstageOffDelay
+);
+
+// >>> FIX (V0.6.1): mesmo motivo do MinOnOK/MinOffOK acima - libera
+// direto quando InterstageOnDelay/InterstageOffDelay = T#0ms, sem
+// depender do Q do TON nesse caso extremo.
+//
+// >>> FIX (V0.7): InterstageOnJustCleared/OffJustCleared marcam que
+// a flag foi zerada NESTE scan, para a Secao 14/15 NAO re-armar no
+// mesmo scan (isso garante que o TON seja chamado com IN=FALSE por
+// pelo menos 1 scan inteiro antes do proximo estagio, permitindo
+// que ele detecte a borda FALSE->TRUE real e reinicie a contagem).
+
+InterstageOnJustCleared := FALSE;
+InterstageOffJustCleared := FALSE;
+
+IF InterstageOnActive AND ((InterstageOnDelay = T#0ms) OR T_InterstageOn.Q) THEN
+    InterstageOnActive := FALSE;
+    InterstageOnJustCleared := TRUE;
+END_IF;
+
+IF InterstageOffActive AND ((InterstageOffDelay = T#0ms) OR T_InterstageOff.Q) THEN
+    InterstageOffActive := FALSE;
+    InterstageOffJustCleared := TRUE;
+END_IF;
+
+
+// ============================================================
+// 12 - DETERMINA SE HAVERA STAGE UP OU STAGE DOWN
+//
+// Normal / retroactive mode:
+// Stage 1 entra quando Demand >= MakeLimit1.
+// Stage N entra quando Demand >= MakeLimitN.
+// Stage N sai quando Demand <= BreakLimitN.
+//
+// Apenas uma mudanca de estagio ocorre por vez.
+//
+// >>> FIX I2 (V0.6): usa Demand (limitada 0-100%) no lugar de
+// Input (bruto).
+// ============================================================
+
+StageUpRequest := FALSE;
+StageDownRequest := FALSE;
+
+IF CurrentStage < 4 THEN
+
+    IF CurrentStage = 0 THEN
+
+        IF Demand >= MakeLimit1 THEN
+            StageUpRequest := TRUE;
+        END_IF;
+
+    ELSIF CurrentStage = 1 THEN
+
+        IF Demand >= MakeLimit2 THEN
+            StageUpRequest := TRUE;
+        END_IF;
+
+    ELSIF CurrentStage = 2 THEN
+
+        IF Demand >= MakeLimit3 THEN
+            StageUpRequest := TRUE;
+        END_IF;
+
+    ELSIF CurrentStage = 3 THEN
+
+        IF Demand >= MakeLimit4 THEN
+            StageUpRequest := TRUE;
+        END_IF;
+
+    END_IF;
+
+END_IF;
+
+
+IF CurrentStage > 0 THEN
+
+    IF CurrentStage = 1 THEN
+
+        IF Demand <= BreakLimit1 THEN
+            StageDownRequest := TRUE;
+        END_IF;
+
+    ELSIF CurrentStage = 2 THEN
+
+        IF Demand <= BreakLimit2 THEN
+            StageDownRequest := TRUE;
+        END_IF;
+
+    ELSIF CurrentStage = 3 THEN
+
+        IF Demand <= BreakLimit3 THEN
+            StageDownRequest := TRUE;
+        END_IF;
+
+    ELSIF CurrentStage = 4 THEN
+
+        IF Demand <= BreakLimit4 THEN
+            StageDownRequest := TRUE;
+        END_IF;
+
+    END_IF;
+
+END_IF;
+
+
+// ============================================================
+// 13 - IDENTIFICA PROXIMO EQUIPAMENTO PARA UP/DOWN
+// ============================================================
+
+UpDevice := 0;
+DownDevice := 0;
+
+
+// Primeiro inativo habilitado = proximo a ligar
+
+FOR i := 1 TO 4 DO
+
+    IF Order[i] > 0 THEN
+
+        IF Enable[Order[i]] AND NOT ActualOut[Order[i]] THEN
+
+            UpDevice := Order[i];
+            EXIT;
+
+        END_IF;
+
+    END_IF;
+
+END_FOR;
+
+
+// Ultimo ativo habilitado = proximo a desligar
+// Como os ativos estao ordenados por Rank crescente,
+// o ultimo ativo e o de maior Rank.
+
+FOR i := 1 TO 4 DO
+
+    IF Order[i] > 0 THEN
+
+        IF Enable[Order[i]] AND ActualOut[Order[i]] THEN
+
+            DownDevice := Order[i];
+
+        END_IF;
+
+    END_IF;
+
+END_FOR;
+
+
+// ============================================================
+// 14 - EXECUTA STAGE UP
+//
+// Se o Interstage OFF estiver contando, ele e cancelado.
+// Se o proximo dispositivo tiver Min Off ativo, aguarda.
+// Se nao existir dispositivo habilitado disponivel, o CurrentStage
+// pode continuar subindo, representando falta de capacidade.
+// ============================================================
+
+StageChangedThisScan := FALSE;
+
+IF StageUpRequest THEN
+
+    IF InterstageOffActive THEN
+        InterstageOffActive := FALSE;
+    END_IF;
+
+    IF NOT InterstageOnActive AND NOT InterstageOnJustCleared THEN
+
+        IF UpDevice = 0 THEN
+
+            CurrentStage := CurrentStage + 1;
+            StageChangedThisScan := TRUE;
+
+        ELSE
+
+            IF UpDevice = 1 THEN
+                IF MinOffOK1 THEN
+                    CurrentStage := CurrentStage + 1;
+                    StageChangedThisScan := TRUE;
+                END_IF;
+            END_IF;
+
+            IF UpDevice = 2 THEN
+                IF MinOffOK2 THEN
+                    CurrentStage := CurrentStage + 1;
+                    StageChangedThisScan := TRUE;
+                END_IF;
+            END_IF;
+
+            IF UpDevice = 3 THEN
+                IF MinOffOK3 THEN
+                    CurrentStage := CurrentStage + 1;
+                    StageChangedThisScan := TRUE;
+                END_IF;
+            END_IF;
+
+            IF UpDevice = 4 THEN
+                IF MinOffOK4 THEN
+                    CurrentStage := CurrentStage + 1;
+                    StageChangedThisScan := TRUE;
+                END_IF;
+            END_IF;
+
+        END_IF;
+
+        IF StageChangedThisScan THEN
+            InterstageOnActive := TRUE;
+        END_IF;
+
+    END_IF;
+
+END_IF;
+
+
+// ============================================================
+// 15 - EXECUTA STAGE DOWN
+//
+// Se o Interstage ON estiver contando, ele e cancelado.
+// Se o proximo dispositivo tiver Min On ativo, aguarda.
+// Instant Shutdown trata a excecao separadamente.
+// ============================================================
+
+IF StageDownRequest AND NOT StageChangedThisScan THEN
+
+    IF InterstageOnActive THEN
+        InterstageOnActive := FALSE;
+    END_IF;
+
+    IF NOT InterstageOffActive AND NOT InterstageOffJustCleared THEN
+
+        IF DownDevice = 0 THEN
+
+            CurrentStage := CurrentStage - 1;
+            StageChangedThisScan := TRUE;
+
+        ELSE
+
+            IF DownDevice = 1 THEN
+                IF MinOnOK1 THEN
+                    CurrentStage := CurrentStage - 1;
+                    StageChangedThisScan := TRUE;
+                END_IF;
+            END_IF;
+
+            IF DownDevice = 2 THEN
+                IF MinOnOK2 THEN
+                    CurrentStage := CurrentStage - 1;
+                    StageChangedThisScan := TRUE;
+                END_IF;
+            END_IF;
+
+            IF DownDevice = 3 THEN
+                IF MinOnOK3 THEN
+                    CurrentStage := CurrentStage - 1;
+                    StageChangedThisScan := TRUE;
+                END_IF;
+            END_IF;
+
+            IF DownDevice = 4 THEN
+                IF MinOnOK4 THEN
+                    CurrentStage := CurrentStage - 1;
+                    StageChangedThisScan := TRUE;
+                END_IF;
+            END_IF;
+
+        END_IF;
+
+        IF StageChangedThisScan THEN
+            InterstageOffActive := TRUE;
+        END_IF;
+
+    END_IF;
+
+END_IF;
+
+
+// ============================================================
+// 16 - LIMITA CURRENT STAGE
+// ============================================================
+
+IF CurrentStage < 0 THEN
+    CurrentStage := 0;
+END_IF;
+
+IF CurrentStage > 4 THEN
+    CurrentStage := 4;
+END_IF;
+
+
+// ============================================================
+// 17 - SELECAO NORMAL
+//
+// Seleciona os primeiros CurrentStage dispositivos da ordem
+// dinamica. Como os ativos ficam antes dos inativos, os
+// equipamentos ja ligados sao preservados e o proximo inativo
+// de menor Rank entra quando necessario.
+//
+// Esta selecao e refeita TODO SCAN para permitir o retry dos
+// Min On/Off.
+// ============================================================
+
+DesiredOut[1] := FALSE;
+DesiredOut[2] := FALSE;
+DesiredOut[3] := FALSE;
+DesiredOut[4] := FALSE;
+
+IF CurrentStage >= 1 THEN
+    IF Order[1] > 0 THEN
+        IF Enable[Order[1]] THEN
+            DesiredOut[Order[1]] := TRUE;
+        END_IF;
+    END_IF;
+END_IF;
+
+IF CurrentStage >= 2 THEN
+    IF Order[2] > 0 THEN
+        IF Enable[Order[2]] THEN
+            DesiredOut[Order[2]] := TRUE;
+        END_IF;
+    END_IF;
+END_IF;
+
+IF CurrentStage >= 3 THEN
+    IF Order[3] > 0 THEN
+        IF Enable[Order[3]] THEN
+            DesiredOut[Order[3]] := TRUE;
+        END_IF;
+    END_IF;
+END_IF;
+
+IF CurrentStage >= 4 THEN
+    IF Order[4] > 0 THEN
+        IF Enable[Order[4]] THEN
+            DesiredOut[Order[4]] := TRUE;
+        END_IF;
+    END_IF;
+END_IF;
+
+
+// ============================================================
+// 18 - DEVICE DISABLED
+//
+// Disabling um equipamento ativo desliga-o imediatamente,
+// ignorando Min On. A selecao normal ja procura outro
+// equipamento habilitado para ocupar a vaga.
+// ============================================================
+
+IF NOT Enable[1] THEN
+    DesiredOut[1] := FALSE;
+END_IF;
+
+IF NOT Enable[2] THEN
+    DesiredOut[2] := FALSE;
+END_IF;
+
+IF NOT Enable[3] THEN
+    DesiredOut[3] := FALSE;
+END_IF;
+
+IF NOT Enable[4] THEN
+    DesiredOut[4] := FALSE;
+END_IF;
+
+
+// ============================================================
+// 19 - MIN OFF
+//
+// Impede uma nova partida enquanto MinOff ainda estiver ativo.
+// A selecao normal continua sendo refeita em todos os scans,
+// portanto existe retry automatico quando o timer expirar.
+// ============================================================
+
+IF DesiredOut[1] AND NOT ActualOut[1] THEN
+    IF NOT MinOffOK1 THEN
+        DesiredOut[1] := FALSE;
+    END_IF;
+END_IF;
+
+IF DesiredOut[2] AND NOT ActualOut[2] THEN
+    IF NOT MinOffOK2 THEN
+        DesiredOut[2] := FALSE;
+    END_IF;
+END_IF;
+
+IF DesiredOut[3] AND NOT ActualOut[3] THEN
+    IF NOT MinOffOK3 THEN
+        DesiredOut[3] := FALSE;
+    END_IF;
+END_IF;
+
+IF DesiredOut[4] AND NOT ActualOut[4] THEN
+    IF NOT MinOffOK4 THEN
+        DesiredOut[4] := FALSE;
+    END_IF;
+END_IF;
+
+
+// ============================================================
+// 20 - MIN ON
+//
+// Impede desligamento enquanto MinOn ainda estiver ativo.
+// Desabilitado e Instant Shutdown sao excecoes.
+// ============================================================
+
+IF Enable[1] AND NOT InstantShutdown THEN
+    IF NOT DesiredOut[1] AND ActualOut[1] THEN
+        IF NOT MinOnOK1 THEN
+            DesiredOut[1] := TRUE;
+        END_IF;
+    END_IF;
+END_IF;
+
+IF Enable[2] AND NOT InstantShutdown THEN
+    IF NOT DesiredOut[2] AND ActualOut[2] THEN
+        IF NOT MinOnOK2 THEN
+            DesiredOut[2] := TRUE;
+        END_IF;
+    END_IF;
+END_IF;
+
+IF Enable[3] AND NOT InstantShutdown THEN
+    IF NOT DesiredOut[3] AND ActualOut[3] THEN
+        IF NOT MinOnOK3 THEN
+            DesiredOut[3] := TRUE;
+        END_IF;
+    END_IF;
+END_IF;
+
+IF Enable[4] AND NOT InstantShutdown THEN
+    IF NOT DesiredOut[4] AND ActualOut[4] THEN
+        IF NOT MinOnOK4 THEN
+            DesiredOut[4] := TRUE;
+        END_IF;
+    END_IF;
+END_IF;
+
+
+// ============================================================
+// 21 - ROTATE NOW
+//
+// Implementacao conforme a regra definida para este projeto:
+//
+// 1. Localiza o equipamento habilitado e ativo de MAIOR Rank.
+// 2. Procura o proximo equipamento habilitado e inativo na
+//    ordem Rank crescente, fazendo wrap-around.
+// 3. Troca os dois imediatamente.
+//
+// Empate de Rank:
+// menor numero entra primeiro;
+// maior numero sai primeiro.
+//
+// A selecao normal do proximo scan usa o novo estado real,
+// portanto a rotacao nao e perdida no scan seguinte.
+//
+// >>> FIX I1 (V0.6): adicionado a condicao AND (CurrentStage > 0) na
+// condicao de entrada. Sem essa guarda, uma coincidencia entre
+// o scan em que CurrentStage cai para 0 e um pulso de RotateNow
+// podia ligar um equipamento que nao deveria estar rodando.
+//
+// >>> FIX C2 (V0.6): REMOVIDO o bloco que zerava T_MinOn/T_MinOff
+// dos 4 dispositivos e o Interstage global. Esse bloco nao era
+// necessario: o dispositivo que sai (RotateOut) so e candidato
+// se ActualOut = TRUE, o que ja garante T_MinOff[RotateOut] com
+// ET=0 nesta mesma varredura (Secao 10); o dispositivo que entra
+// (RotateIn) so e candidato se ActualOut = FALSE, o que ja
+// garante T_MinOn[RotateIn] com ET=0 (Secao 9). Ou seja, os dois
+// dispositivos envolvidos na troca ja estao com os timers
+// relevantes zerados por construcao - nao ha necessidade de
+// resetar nada manualmente. O bypass do Min On/Min Off para o
+// PAR trocado ja ocorre naturalmente pela ordem das secoes
+// (Secao 21 roda depois de 19/20 e sobrescreve DesiredOut). O
+// bloco removido so causava dano: reiniciava os timers de
+// equipamentos NAO envolvidos na rotacao e cancelava transicoes
+// de Interstage em andamento por motivo de demanda, sem relacao
+// alguma com a rotacao.
+// ============================================================
+
+IF RotatePulse AND NOT InstantShutdown AND (CurrentStage > 0) THEN
+
+    RotateOut := 0;
+    RotateIn := 0;
+
+    // Maior Rank ativo.
+    // Em empate, maior numero do dispositivo.
+    FOR i := 1 TO 4 DO
+
+        IF Enable[i] AND ActualOut[i] THEN
+
+            IF RotateOut = 0 THEN
+
+                RotateOut := i;
+
+            ELSE
+
+                IF Rank[i] > Rank[RotateOut] THEN
+
+                    RotateOut := i;
+
+                ELSIF Rank[i] = Rank[RotateOut] THEN
+
+                    IF i > RotateOut THEN
+                        RotateOut := i;
+                    END_IF;
+
+                END_IF;
+
+            END_IF;
+
+        END_IF;
+
+    END_FOR;
+
+
+    // Encontra a posicao do equipamento que sera retirado
+    // na ordem BASE de Rank.
+    RotatePos := 0;
+
+    IF RotateOut > 0 THEN
+
+        FOR i := 1 TO 4 DO
+
+            IF BaseOrder[i] = RotateOut THEN
+                RotatePos := i;
+            END_IF;
+
+        END_FOR;
+
+    END_IF;
+
+
+    // Procura o proximo habilitado + inativo depois do
+    // equipamento retirado, fazendo wrap-around.
+    IF RotatePos > 0 THEN
+
+        FOR k := 1 TO 4 DO
+
+            CandidatePos := RotatePos + k;
+
+            IF CandidatePos > 4 THEN
+                CandidatePos := CandidatePos - 4;
+            END_IF;
+
+            DeviceIndex := BaseOrder[CandidatePos];
+
+            IF Enable[DeviceIndex] AND NOT ActualOut[DeviceIndex] THEN
+
+                RotateIn := DeviceIndex;
+                EXIT;
+
+            END_IF;
+
+        END_FOR;
+
+    END_IF;
+
+
+    // Executa a troca.
+    IF (RotateOut > 0) AND (RotateIn > 0) THEN
+
+        DesiredOut[RotateOut] := FALSE;
+        DesiredOut[RotateIn] := TRUE;
+
+    END_IF;
+
+END_IF;
+
+
+// ============================================================
+// 22 - INSTANT SHUTDOWN
+//
+// Ignora Min On e Interstage Off.
+// ============================================================
+
+IF InstantShutdown THEN
+
+    DesiredOut[1] := FALSE;
+    DesiredOut[2] := FALSE;
+    DesiredOut[3] := FALSE;
+    DesiredOut[4] := FALSE;
+
+    CurrentStage := 0;
+
+    InterstageOnActive := FALSE;
+    InterstageOffActive := FALSE;
+
+    T_InterstageOn(IN := FALSE, PT := InterstageOnDelay);
+    T_InterstageOff(IN := FALSE, PT := InterstageOffDelay);
+
+END_IF;
+
+
+// ============================================================
+// 23 - ATUALIZA SAIDAS
+// ============================================================
+
+Device1Out := DesiredOut[1];
+Device2Out := DesiredOut[2];
+Device3Out := DesiredOut[3];
+Device4Out := DesiredOut[4];
+
+
+// ============================================================
+// 24 - INTERSTAGE TIMING
+// ============================================================
+
+InterstageTiming := InterstageOnActive OR InterstageOffActive;
+
+
+// ============================================================
+// 25 - OPERATING STATE
+//
+// 0 = Idle
+// 1 = Starting
+// 2 = Running
+// 3 = Stopping
+// ============================================================
+
+IF InstantShutdown THEN
+
+    OperatingState := 0;
+
+ELSIF CurrentStage = 0 THEN
+
+    OperatingState := 0;
+
+ELSIF CurrentStage > PreviousStage THEN
+
+    OperatingState := 1;
+
+ELSIF CurrentStage < PreviousStage THEN
+
+    OperatingState := 3;
+
+ELSE
+
+    OperatingState := 2;
+
+END_IF;
+
+END_FUNCTION_BLOCK
